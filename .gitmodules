@@ -1,0 +1,4 @@
+[submodule "backend/data/eth-labels"]
+	url = https://github.com/dawsbot/eth-labels.git
+	branch = v1
+	path = backend/data/eth-labels
