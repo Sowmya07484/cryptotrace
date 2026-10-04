@@ -219,7 +219,7 @@ function getDirection(
     getTransactionTo(tx).toLowerCase();
 
   const wallet =
-    walletAddress.toLowerCase();
+    String(walletAddress || "").toLowerCase();
 
   if (wallet && from === wallet) {
     return "outgoing";
@@ -238,6 +238,7 @@ function getDirection(
 
 function getRiskObject(source) {
   return (
+    source?.risk_analysis ||
     source?.risk ||
     source?.risk_assessment ||
     source?.riskAssessment ||
@@ -299,29 +300,39 @@ function getRiskReasons(source) {
 }
 
 function getWalletRisk(wallet) {
+  const nestedRisk =
+    wallet?.risk ||
+    wallet?.risk_analysis ||
+    {};
+
   return {
     score: firstDefined(
       wallet?.risk_score,
       wallet?.overall_risk_score,
-      wallet?.risk?.score,
-      wallet?.risk?.risk_score,
+      nestedRisk?.overall_risk_score,
+      nestedRisk?.risk_score,
+      nestedRisk?.score,
       null
     ),
 
     level: firstDefined(
       wallet?.risk_level,
       wallet?.overall_risk_level,
-      wallet?.risk?.level,
-      wallet?.risk?.risk_level,
+      nestedRisk?.overall_risk_level,
+      nestedRisk?.risk_level,
+      nestedRisk?.level,
       null
     ),
 
-    reasons:
-      wallet?.risk_reasons ||
-      wallet?.risk_factors ||
-      wallet?.risk?.reasons ||
-      wallet?.risk?.risk_reasons ||
-      [],
+    reasons: firstDefined(
+      wallet?.risk_reasons,
+      wallet?.risk_factors,
+      nestedRisk?.risk_reasons,
+      nestedRisk?.reasons,
+      nestedRisk?.risk_factors,
+      nestedRisk?.factors,
+      []
+    ),
   };
 }
 
@@ -929,6 +940,46 @@ function InvestigationSummary({
     response?.investigation_analytics ||
     {};
 
+  /* -------------------------------------------------------
+     Backend summary values
+  ------------------------------------------------------- */
+
+  const walletIncoming =
+    wallets.reduce(
+      (total, wallet) => {
+        const value =
+          firstDefined(
+            wallet?.incoming_transaction_count,
+            wallet?.incoming_count,
+            null
+          );
+
+        return (
+          total +
+          (toNumber(value) ?? 0)
+        );
+      },
+      0
+    );
+
+  const walletOutgoing =
+    wallets.reduce(
+      (total, wallet) => {
+        const value =
+          firstDefined(
+            wallet?.outgoing_transaction_count,
+            wallet?.outgoing_count,
+            null
+          );
+
+        return (
+          total +
+          (toNumber(value) ?? 0)
+        );
+      },
+      0
+    );
+
   const incoming =
     firstDefined(
       analytics?.incoming_transactions,
@@ -936,7 +987,9 @@ function InvestigationSummary({
       summary?.incoming_transactions,
       summary?.incoming_count,
       response?.incoming_transaction_count,
-      null
+      wallets.length > 0
+        ? walletIncoming
+        : null
     );
 
   const outgoing =
@@ -946,7 +999,9 @@ function InvestigationSummary({
       summary?.outgoing_transactions,
       summary?.outgoing_count,
       response?.outgoing_transaction_count,
-      null
+      wallets.length > 0
+        ? walletOutgoing
+        : null
     );
 
   const incomingValue =
@@ -1905,6 +1960,7 @@ function RelationshipGraph({
 
 function TransactionTable({
   transactions,
+  walletAddress,
   onSelectTransaction,
 }) {
   if (
@@ -1975,8 +2031,10 @@ function TransactionTable({
                   ),
 
                 direction:
-                  tx?.direction ||
-                  "unknown",
+                  getDirection(
+                    tx,
+                    walletAddress
+                  ),
 
                 timestamp:
                   tx?.timestamp,
@@ -2366,6 +2424,33 @@ export default function InvestigatorDashboard({
     );
 
   /* -------------------------------------------------------
+     REAL BACKEND INVESTIGATION METADATA
+  ------------------------------------------------------- */
+
+  const investigationMetadata =
+    response?.investigation || {};
+
+  const startingWallet =
+    investigationMetadata?.wallet ||
+    response?.wallet_address ||
+    wallets.find(
+      (wallet) =>
+        Number(wallet.hop) ===
+        0
+    )?.address ||
+    "";
+
+  const network =
+    investigationMetadata?.network ||
+    response?.network ||
+    "";
+
+  const maxHops =
+    investigationMetadata?.max_hops ??
+    response?.max_hops ??
+    null;
+
+  /* -------------------------------------------------------
      Automatically select starting wallet
   ------------------------------------------------------- */
 
@@ -2495,10 +2580,10 @@ export default function InvestigatorDashboard({
             );
 
           const direction =
-            String(
-              tx?.direction ||
-                "unknown"
-            ).toLowerCase();
+            getDirection(
+              tx,
+              startingWallet
+            );
 
           const from =
             getTransactionFrom(
@@ -2557,6 +2642,7 @@ export default function InvestigatorDashboard({
     }, [
       transactions,
       filters,
+      startingWallet,
     ]);
 
   /* -------------------------------------------------------
@@ -2746,14 +2832,6 @@ export default function InvestigatorDashboard({
     );
   }
 
-  const startingWallet =
-    response?.wallet_address ||
-    wallets.find(
-      (wallet) =>
-        Number(wallet.hop) ===
-        0
-    )?.address;
-
   return (
     <main className="investigator-dashboard">
       <div className="dashboard-shell">
@@ -2784,7 +2862,7 @@ export default function InvestigatorDashboard({
           <div className="network-badge">
             <span className="network-dot" />
 
-            {response.network ||
+            {network ||
               "Network not provided"}
           </div>
         </header>
@@ -2811,7 +2889,7 @@ export default function InvestigatorDashboard({
             </span>
 
             <strong>
-              {response.max_hops ??
+              {maxHops ??
                 "Not provided"}
             </strong>
           </div>
@@ -3025,6 +3103,9 @@ export default function InvestigatorDashboard({
           <TransactionTable
             transactions={
               filteredTransactions
+            }
+            walletAddress={
+              startingWallet
             }
             onSelectTransaction={
               setSelectedTransaction
