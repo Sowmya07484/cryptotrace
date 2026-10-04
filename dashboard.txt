@@ -1,0 +1,1563 @@
+import React, { useMemo, useState } from "react";
+import "../styles/dashboard.css";
+
+/*
+ * CryptoTrace - Hour 7 Investigator Dashboard
+ *
+ * This page consumes the REAL /investigate response.
+ *
+ * Expected response shape:
+ *
+ * {
+ *   wallet_address: "...",git status
+ *   network: "ethereum",
+ *   max_hops: 2,
+ *   wallets: [
+ *     {
+ *       address: "...",
+ *       hop: 0,
+ *       transaction_count: 37,
+ *       transactions: [...]
+ *     }
+ *   ],
+ *   edges: [...],
+ *   transactions: [...]
+ * }
+ *
+ * The normalizer below also supports the richer Hour-7 fields
+ * if Person 1 adds them later.
+ */
+
+function shortenAddress(address, start = 8, end = 6) {
+  if (!address) return "Unknown";
+
+  if (address.length <= start + end + 3) {
+    return address;
+  }
+
+  return `${address.slice(0, start)}...${address.slice(-end)}`;
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) return "—";
+
+  const numericTimestamp = Number(timestamp);
+
+  if (Number.isNaN(numericTimestamp)) {
+    return String(timestamp);
+  }
+
+  const date = new Date(
+    numericTimestamp < 100000000000
+      ? numericTimestamp * 1000
+      : numericTimestamp
+  );
+
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleString();
+}
+
+function formatValue(value, asset) {
+  if (value === undefined || value === null || value === "") {
+    return "—";
+  }
+
+  const number = Number(value);
+
+  if (Number.isNaN(number)) {
+    return `${value} ${asset || ""}`.trim();
+  }
+
+  /*
+   * We intentionally do not guess ERC-20 decimals here.
+   * The backend response currently provides raw values.
+   */
+  return `${value} ${asset || ""}`.trim();
+}
+
+function getEntityName(wallet) {
+  return (
+    wallet?.entity_name ||
+    wallet?.entity?.name ||
+    wallet?.name_tag ||
+    wallet?.entity_tag ||
+    wallet?.label ||
+    null
+  );
+}
+
+function getEntityCategory(wallet) {
+  return (
+    wallet?.entity_category ||
+    wallet?.category ||
+    wallet?.label_category ||
+    wallet?.entity?.category ||
+    null
+  );
+}
+
+function getWalletTransactions(wallet) {
+  if (!wallet) return [];
+
+  return Array.isArray(wallet.transactions)
+    ? wallet.transactions
+    : [];
+}
+
+function getTransactionFrom(tx) {
+  return (
+    tx?.from_address ||
+    tx?.from ||
+    tx?.sender ||
+    ""
+  );
+}
+
+function getTransactionTo(tx) {
+  return (
+    tx?.to_address ||
+    tx?.to ||
+    tx?.receiver ||
+    ""
+  );
+}
+
+function getTransactionHash(tx) {
+  return (
+    tx?.hash ||
+    tx?.transaction_hash ||
+    tx?.tx_hash ||
+    ""
+  );
+}
+
+function getTransactionAsset(tx) {
+  return (
+    tx?.token_symbol ||
+    tx?.asset ||
+    tx?.symbol ||
+    "Unknown"
+  );
+}
+
+function getDirection(tx, walletAddress) {
+  const from = getTransactionFrom(tx).toLowerCase();
+  const to = getTransactionTo(tx).toLowerCase();
+  const wallet = (walletAddress || "").toLowerCase();
+
+  if (tx?.direction) {
+    return String(tx.direction).toLowerCase();
+  }
+
+  if (from === wallet) {
+    return "outgoing";
+  }
+
+  if (to === wallet) {
+    return "incoming";
+  }
+
+  return "unknown";
+}
+
+function getCounterparty(tx, walletAddress) {
+  const direction = getDirection(tx, walletAddress);
+
+  if (direction === "incoming") {
+    return getTransactionFrom(tx);
+  }
+
+  if (direction === "outgoing") {
+    return getTransactionTo(tx);
+  }
+
+  return "";
+}
+
+/*
+ * Build wallet activity from transactions when the backend
+ * has not yet supplied the Hour-7 summary fields.
+ */
+function calculateWalletStats(wallet) {
+  const address = wallet?.address || "";
+
+  const transactions = getWalletTransactions(wallet);
+
+  let incoming = 0;
+  let outgoing = 0;
+
+  const counterparties = new Set();
+  const assets = new Set();
+
+  transactions.forEach((tx) => {
+    const direction = getDirection(tx, address);
+
+    if (direction === "incoming") {
+      incoming += 1;
+    }
+
+    if (direction === "outgoing") {
+      outgoing += 1;
+    }
+
+    const counterparty = getCounterparty(tx, address);
+
+    if (counterparty) {
+      counterparties.add(counterparty.toLowerCase());
+    }
+
+    const asset = getTransactionAsset(tx);
+
+    if (asset) {
+      assets.add(asset);
+    }
+  });
+
+  return {
+    transactionCount:
+      wallet?.transaction_count ??
+      wallet?.transactions_count ??
+      transactions.length,
+
+    incoming:
+      wallet?.incoming_transaction_count ??
+      wallet?.incoming_count ??
+      wallet?.incoming_transactions ??
+      incoming,
+
+    outgoing:
+      wallet?.outgoing_transaction_count ??
+      wallet?.outgoing_count ??
+      wallet?.outgoing_transactions ??
+      outgoing,
+
+    counterparties:
+      wallet?.unique_counterpart_count ??
+      wallet?.counterpart_count ??
+      wallet?.unique_counterparties ??
+      counterparties.size,
+
+    assets:
+      Array.isArray(wallet?.assets)
+        ? wallet.assets
+        : Array.isArray(wallet?.assets_tokens)
+        ? wallet.assets_tokens
+        : Array.from(assets),
+  };
+}
+
+/*
+ * Normalize edges so the UI can handle both the current
+ * backend response and the richer Hour-7 response.
+ */
+function normalizeEdges(edges, transactions) {
+  if (Array.isArray(edges) && edges.length > 0) {
+    return edges.map((edge, index) => ({
+      id:
+        edge.id ||
+        edge.edge_id ||
+        edge.hash ||
+        edge.transaction_hash ||
+        `edge-${index}`,
+
+      from:
+        edge.from ||
+        edge.from_address ||
+        edge.source ||
+        "",
+
+      to:
+        edge.to ||
+        edge.to_address ||
+        edge.target ||
+        "",
+
+      hash:
+        edge.hash ||
+        edge.transaction_hash ||
+        edge.tx_hash ||
+        "",
+
+      asset:
+        edge.asset ||
+        edge.token_symbol ||
+        edge.symbol ||
+        "Unknown",
+
+      value:
+        edge.value ??
+        "",
+
+      transactionType:
+        edge.transaction_type ||
+        edge.type ||
+        "unknown",
+
+      timestamp:
+        edge.timestamp ||
+        null,
+
+      hop:
+        edge.hop ?? null,
+
+      direction:
+        edge.direction ||
+        "unknown",
+    }));
+  }
+
+  /*
+   * Your current supplied response can have transactions
+   * but no edges. We do NOT invent relationships.
+   *
+   * We derive visual relationships directly from real
+   * transaction sender/receiver fields.
+   */
+  if (Array.isArray(transactions)) {
+    return transactions
+      .filter((tx) => getTransactionFrom(tx) && getTransactionTo(tx))
+      .map((tx, index) => ({
+        id:
+          getTransactionHash(tx) ||
+          `transaction-edge-${index}`,
+
+        from: getTransactionFrom(tx),
+
+        to: getTransactionTo(tx),
+
+        hash: getTransactionHash(tx),
+
+        asset: getTransactionAsset(tx),
+
+        value: tx?.value ?? "",
+
+        transactionType:
+          tx?.transaction_type ||
+          tx?.type ||
+          "unknown",
+
+        timestamp: tx?.timestamp || null,
+
+        hop: tx?.hop ?? null,
+
+        direction: tx?.direction || "unknown",
+      }));
+  }
+
+  return [];
+}
+
+function StatCard({ label, value, icon }) {
+  return (
+    <div className="investigator-stat-card">
+      <div className="stat-icon">{icon}</div>
+
+      <div>
+        <div className="stat-value">{value}</div>
+        <div className="stat-label">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function EntityBadge({ wallet }) {
+  const entityName = getEntityName(wallet);
+  const category = getEntityCategory(wallet);
+
+  if (!entityName && !category) {
+    return (
+      <span className="entity-badge unknown">
+        Unknown entity
+      </span>
+    );
+  }
+
+  return (
+    <div className="entity-badge known">
+      <span className="entity-dot" />
+
+      <span>
+        {entityName || "Known entity"}
+
+        {category && (
+          <small>{category}</small>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function HopBadge({ hop }) {
+  if (hop === 0) {
+    return (
+      <span className="hop-badge root">
+        Starting wallet
+      </span>
+    );
+  }
+
+  return (
+    <span className="hop-badge">
+      Hop {hop}
+    </span>
+  );
+}
+
+function WalletCard({
+  wallet,
+  selected,
+  onClick,
+}) {
+  const stats = calculateWalletStats(wallet);
+
+  return (
+    <button
+      type="button"
+      className={`wallet-list-card ${
+        selected ? "selected" : ""
+      }`}
+      onClick={onClick}
+    >
+      <div className="wallet-card-top">
+        <HopBadge hop={wallet.hop} />
+
+        <span className="wallet-card-arrow">
+          →
+        </span>
+      </div>
+
+      <div className="wallet-card-address">
+        {shortenAddress(wallet.address)}
+      </div>
+
+      <EntityBadge wallet={wallet} />
+
+      <div className="wallet-mini-stats">
+        <div>
+          <strong>{stats.transactionCount}</strong>
+          <span>Transactions</span>
+        </div>
+
+        <div>
+          <strong>{stats.incoming}</strong>
+          <span>Incoming</span>
+        </div>
+
+        <div>
+          <strong>{stats.outgoing}</strong>
+          <span>Outgoing</span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function RelationshipGraph({
+  wallets,
+  edges,
+  selectedWallet,
+  onSelectWallet,
+  onSelectEdge,
+}) {
+  /*
+   * This is a lightweight graph implementation using
+   * real backend relationships.
+   *
+   * It deliberately avoids inventing relationships.
+   */
+
+  const groupedWallets = useMemo(() => {
+    const groups = {};
+
+    wallets.forEach((wallet) => {
+      const hop = wallet.hop ?? 0;
+
+      if (!groups[hop]) {
+        groups[hop] = [];
+      }
+
+      groups[hop].push(wallet);
+    });
+
+    return groups;
+  }, [wallets]);
+
+  const hops = Object.keys(groupedWallets)
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  if (wallets.length === 0) {
+    return (
+      <div className="empty-state">
+        <div className="empty-icon">◎</div>
+
+        <h3>No wallets traced</h3>
+
+        <p>
+          Run an investigation to populate the
+          relationship graph.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="graph-wrapper">
+      <div className="graph-scroll">
+        {hops.map((hop, hopIndex) => (
+          <React.Fragment key={hop}>
+            <div className="graph-hop-column">
+              <div className="graph-hop-title">
+                {hop === 0
+                  ? "Starting Wallet"
+                  : `Hop ${hop}`}
+              </div>
+
+              <div className="graph-hop-line">
+                {groupedWallets[hop].map((wallet) => {
+                  const isSelected =
+                    selectedWallet?.address?.toLowerCase() ===
+                    wallet.address?.toLowerCase();
+
+                  return (
+                    <button
+                      type="button"
+                      key={wallet.address}
+                      className={`graph-wallet-node ${
+                        isSelected ? "selected" : ""
+                      }`}
+                      onClick={() =>
+                        onSelectWallet(wallet)
+                      }
+                    >
+                      <div className="node-hop">
+                        H{wallet.hop}
+                      </div>
+
+                      <div className="node-address">
+                        {shortenAddress(
+                          wallet.address,
+                          7,
+                          5
+                        )}
+                      </div>
+
+                      <EntityBadge wallet={wallet} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {hopIndex < hops.length - 1 && (
+              <div className="graph-connector">
+                <span>→</span>
+              </div>
+            )}
+          </React.Fragment>
+        ))}
+      </div>
+
+      <div className="graph-relationships">
+        <div className="graph-relationship-header">
+          <div>
+            <h3>Relationships</h3>
+
+            <p>
+              Select a relationship to inspect its
+              transaction.
+            </p>
+          </div>
+
+          <span className="relationship-count">
+            {edges.length} relationships
+          </span>
+        </div>
+
+        {edges.length === 0 ? (
+          <div className="graph-no-relationships">
+            No relationship edges were returned by the
+            backend yet.
+          </div>
+        ) : (
+          <div className="relationship-list">
+            {edges.map((edge) => (
+              <button
+                type="button"
+                key={edge.id}
+                className="relationship-row"
+                onClick={() => onSelectEdge(edge)}
+              >
+                <div className="relationship-address">
+                  <span>
+                    {shortenAddress(edge.from)}
+                  </span>
+
+                  <strong>→</strong>
+
+                  <span>
+                    {shortenAddress(edge.to)}
+                  </span>
+                </div>
+
+                <div className="relationship-meta">
+                  <span className="asset-pill">
+                    {edge.asset}
+                  </span>
+
+                  <span>
+                    {edge.transactionType}
+                  </span>
+
+                  {edge.hop !== null && (
+                    <span>Hop {edge.hop}</span>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WalletOverview({
+  wallet,
+  edges,
+}) {
+  if (!wallet) {
+    return (
+      <div className="empty-state compact">
+        <div className="empty-icon">◉</div>
+
+        <h3>Select a wallet</h3>
+
+        <p>
+          Choose a wallet from the investigation graph
+          or wallet list.
+        </p>
+      </div>
+    );
+  }
+
+  const stats = calculateWalletStats(wallet);
+
+  const walletEdges = edges.filter((edge) => {
+    const address =
+      wallet.address?.toLowerCase();
+
+    return (
+      edge.from?.toLowerCase() === address ||
+      edge.to?.toLowerCase() === address
+    );
+  });
+
+  return (
+    <div className="wallet-overview">
+      <div className="detail-heading">
+        <div>
+          <div className="detail-eyebrow">
+            WALLET OVERVIEW
+          </div>
+
+          <h2>
+            {shortenAddress(
+              wallet.address,
+              10,
+              8
+            )}
+          </h2>
+
+          <div className="full-address">
+            {wallet.address}
+          </div>
+        </div>
+
+        <HopBadge hop={wallet.hop} />
+      </div>
+
+      <div className="detail-entity">
+        <EntityBadge wallet={wallet} />
+      </div>
+
+      <div className="activity-grid">
+        <div className="activity-card">
+          <span>Transactions</span>
+          <strong>{stats.transactionCount}</strong>
+        </div>
+
+        <div className="activity-card incoming">
+          <span>Incoming</span>
+          <strong>{stats.incoming}</strong>
+        </div>
+
+        <div className="activity-card outgoing">
+          <span>Outgoing</span>
+          <strong>{stats.outgoing}</strong>
+        </div>
+
+        <div className="activity-card">
+          <span>Counterparties</span>
+          <strong>{stats.counterparties}</strong>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <div className="detail-section-title">
+          Assets / Tokens
+        </div>
+
+        {stats.assets.length === 0 ? (
+          <span className="muted">
+            No asset information available.
+          </span>
+        ) : (
+          <div className="asset-list">
+            {stats.assets.map((asset) => (
+              <span
+                className="asset-pill"
+                key={asset}
+              >
+                {asset}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="detail-section">
+        <div className="detail-section-title">
+          Connected relationships
+        </div>
+
+        <div className="connection-summary">
+          {walletEdges.length} relationship
+          {walletEdges.length === 1 ? "" : "s"} in
+          the current investigation.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransactionDetails({
+  transaction,
+  onClose,
+}) {
+  if (!transaction) {
+    return (
+      <div className="empty-state compact">
+        <div className="empty-icon">↔</div>
+
+        <h3>No transaction selected</h3>
+
+        <p>
+          Select a relationship to inspect the
+          transaction details.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="transaction-details">
+      <div className="detail-heading">
+        <div>
+          <div className="detail-eyebrow">
+            TRANSACTION DETAILS
+          </div>
+
+          <h2>
+            {transaction.asset || "Transaction"}
+          </h2>
+        </div>
+
+        <button
+          type="button"
+          className="close-detail-button"
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="transaction-hash">
+        <span>Transaction hash</span>
+
+        <code>
+          {transaction.hash || "Unavailable"}
+        </code>
+      </div>
+
+      <div className="transaction-fields">
+        <div>
+          <span>From</span>
+          <code>
+            {transaction.from || "Unknown"}
+          </code>
+        </div>
+
+        <div>
+          <span>To</span>
+          <code>
+            {transaction.to || "Unknown"}
+          </code>
+        </div>
+
+        <div>
+          <span>Asset / Token</span>
+          <strong>
+            {transaction.asset || "Unknown"}
+          </strong>
+        </div>
+
+        <div>
+          <span>Value</span>
+          <strong>
+            {formatValue(
+              transaction.value,
+              transaction.asset
+            )}
+          </strong>
+        </div>
+
+        <div>
+          <span>Transaction type</span>
+          <strong>
+            {transaction.transactionType ||
+              "Unknown"}
+          </strong>
+        </div>
+
+        <div>
+          <span>Direction</span>
+          <strong>
+            {transaction.direction || "Unknown"}
+          </strong>
+        </div>
+
+        <div>
+          <span>Hop</span>
+          <strong>
+            {transaction.hop ?? "Unknown"}
+          </strong>
+        </div>
+
+        <div>
+          <span>Timestamp</span>
+          <strong>
+            {formatTimestamp(
+              transaction.timestamp
+            )}
+          </strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransactionTable({
+  transactions,
+  selectedWallet,
+  onSelectTransaction,
+}) {
+  const visibleTransactions = useMemo(() => {
+    if (!selectedWallet) {
+      return transactions;
+    }
+
+    const address =
+      selectedWallet.address?.toLowerCase();
+
+    const walletTransactions =
+      transactions.filter((tx) => {
+        const from =
+          getTransactionFrom(tx).toLowerCase();
+
+        const to =
+          getTransactionTo(tx).toLowerCase();
+
+        return from === address || to === address;
+      });
+
+    return walletTransactions.length > 0
+      ? walletTransactions
+      : transactions;
+  }, [transactions, selectedWallet]);
+
+  if (visibleTransactions.length === 0) {
+    return (
+      <div className="empty-state compact">
+        <div className="empty-icon">▤</div>
+
+        <h3>No transactions</h3>
+
+        <p>
+          No transactions are available for this
+          investigation.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="transaction-table-wrapper">
+      <table className="transaction-table">
+        <thead>
+          <tr>
+            <th>Hash</th>
+            <th>Direction</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Asset</th>
+            <th>Type</th>
+            <th>Time</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {visibleTransactions.map((tx, index) => {
+            const walletAddress =
+              selectedWallet?.address || "";
+
+            const direction = getDirection(
+              tx,
+              walletAddress
+            );
+
+            const normalized = {
+              hash: getTransactionHash(tx),
+
+              from: getTransactionFrom(tx),
+
+              to: getTransactionTo(tx),
+
+              asset: getTransactionAsset(tx),
+
+              value: tx?.value ?? "",
+
+              transactionType:
+                tx?.transaction_type ||
+                tx?.type ||
+                "unknown",
+
+              timestamp: tx?.timestamp,
+
+              hop: tx?.hop,
+
+              direction,
+            };
+
+            return (
+              <tr
+                key={
+                  normalized.hash ||
+                  `${index}-${normalized.from}-${normalized.to}`
+                }
+                onClick={() =>
+                  onSelectTransaction(
+                    normalized
+                  )
+                }
+              >
+                <td>
+                  <code>
+                    {shortenAddress(
+                      normalized.hash,
+                      9,
+                      7
+                    )}
+                  </code>
+                </td>
+
+                <td>
+                  <span
+                    className={`direction-badge ${direction}`}
+                  >
+                    {direction}
+                  </span>
+                </td>
+
+                <td>
+                  {shortenAddress(
+                    normalized.from
+                  )}
+                </td>
+
+                <td>
+                  {shortenAddress(
+                    normalized.to
+                  )}
+                </td>
+
+                <td>
+                  <span className="asset-pill">
+                    {normalized.asset}
+                  </span>
+                </td>
+
+                <td>
+                  {normalized.transactionType}
+                </td>
+
+                <td>
+                  {formatTimestamp(
+                    normalized.timestamp
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default function InvestigatorDashboard({
+  investigation = null,
+  data = null,
+  result = null,
+}) {
+  /*
+   * Accept multiple prop names so this page can work with
+   * the existing App.jsx even if it passes the response
+   * as investigation, data, or result.
+   */
+  const response =
+    investigation || data || result || null;
+
+  const [selectedWallet, setSelectedWallet] =
+    useState(null);
+
+  const [selectedTransaction, setSelectedTransaction] =
+    useState(null);
+
+  const [search, setSearch] = useState("");
+
+  const wallets = Array.isArray(response?.wallets)
+    ? response.wallets
+    : [];
+
+  const transactions = Array.isArray(
+    response?.transactions
+  )
+    ? response.transactions
+    : wallets.flatMap((wallet) =>
+        getWalletTransactions(wallet)
+      );
+
+  const edges = useMemo(
+    () =>
+      normalizeEdges(
+        response?.edges,
+        transactions
+      ),
+    [response, transactions]
+  );
+
+  /*
+   * If no wallet has been selected, select the hop-0
+   * starting wallet automatically.
+   */
+  React.useEffect(() => {
+    if (!selectedWallet && wallets.length > 0) {
+      const root =
+        wallets.find(
+          (wallet) => Number(wallet.hop) === 0
+        ) || wallets[0];
+
+      setSelectedWallet(root);
+    }
+  }, [wallets, selectedWallet]);
+
+  const summary = useMemo(() => {
+    const hopSet = new Set();
+
+    const assetSet = new Set();
+
+    let knownEntities = 0;
+
+    let unknownEntities = 0;
+
+    wallets.forEach((wallet) => {
+      hopSet.add(wallet.hop ?? 0);
+
+      const entityName =
+        getEntityName(wallet);
+
+      const category =
+        getEntityCategory(wallet);
+
+      if (entityName || category) {
+        knownEntities += 1;
+      } else {
+        unknownEntities += 1;
+      }
+
+      const stats =
+        calculateWalletStats(wallet);
+
+      stats.assets.forEach((asset) =>
+        assetSet.add(asset)
+      );
+    });
+
+    return {
+      wallets: response?.summary
+        ?.total_wallets_traced ??
+        response?.summary?.wallets_traced ??
+        wallets.length,
+
+      transactions:
+        response?.summary
+          ?.total_transactions ??
+        transactions.length,
+
+      relationships:
+        response?.summary
+          ?.total_relationships ??
+        edges.length,
+
+      hops:
+        response?.summary?.hops ??
+        hopSet.size,
+
+      known:
+        response?.summary?.known_entities ??
+        knownEntities,
+
+      unknown:
+        response?.summary?.unknown_entities ??
+        unknownEntities,
+
+      assets:
+        response?.summary?.assets_tokens_observed ??
+        Array.from(assetSet),
+    };
+  }, [response, wallets, transactions, edges]);
+
+  const filteredWallets = useMemo(() => {
+    const query =
+      search.trim().toLowerCase();
+
+    if (!query) {
+      return wallets;
+    }
+
+    return wallets.filter((wallet) => {
+      const address =
+        wallet.address?.toLowerCase() || "";
+
+      const entity =
+        getEntityName(wallet)
+          ?.toLowerCase() || "";
+
+      const category =
+        getEntityCategory(wallet)
+          ?.toLowerCase() || "";
+
+      return (
+        address.includes(query) ||
+        entity.includes(query) ||
+        category.includes(query)
+      );
+    });
+  }, [wallets, search]);
+
+  const handleWalletSelect = (wallet) => {
+    setSelectedWallet(wallet);
+    setSelectedTransaction(null);
+  };
+
+  const handleEdgeSelect = (edge) => {
+    setSelectedTransaction(edge);
+
+    const matchingWallet = wallets.find(
+      (wallet) => {
+        const address =
+          wallet.address?.toLowerCase();
+
+        return (
+          address === edge.from?.toLowerCase() ||
+          address === edge.to?.toLowerCase()
+        );
+      }
+    );
+
+    if (matchingWallet) {
+      setSelectedWallet(matchingWallet);
+    }
+  };
+
+  /*
+   * No investigation response yet.
+   */
+  if (!response) {
+    return (
+      <main className="investigator-dashboard">
+        <div className="dashboard-shell">
+          <div className="dashboard-empty-page">
+            <div className="empty-page-icon">
+              ◇
+            </div>
+
+            <h1>
+              CryptoTrace Investigator
+            </h1>
+
+            <p>
+              Run an investigation to see wallet
+              relationships, transaction activity,
+              entities and hop-by-hop tracing.
+            </p>
+
+            <div className="empty-page-hint">
+              Waiting for the real{" "}
+              <code>/investigate</code> response.
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="investigator-dashboard">
+      <div className="dashboard-shell">
+
+        {/* =====================================================
+            HEADER
+        ====================================================== */}
+
+        <header className="dashboard-header">
+          <div>
+            <div className="dashboard-eyebrow">
+              CRYPTOTRACE · INVESTIGATION
+            </div>
+
+            <h1>
+              Wallet Investigation Dashboard
+            </h1>
+
+            <p>
+              Follow the real blockchain trail
+              across wallet hops and inspect the
+              evidence behind each relationship.
+            </p>
+          </div>
+
+          <div className="network-badge">
+            <span className="network-dot" />
+
+            {response.network ||
+              "Ethereum"}
+          </div>
+        </header>
+
+        {/* =====================================================
+            INVESTIGATION TARGET
+        ====================================================== */}
+
+        <section className="investigation-target">
+          <div>
+            <span className="target-label">
+              STARTING WALLET
+            </span>
+
+            <code>
+              {response.wallet_address ||
+                wallets.find(
+                  (wallet) =>
+                    Number(wallet.hop) === 0
+                )?.address ||
+                "Not available"}
+            </code>
+          </div>
+
+          <div className="target-hops">
+            <span>Maximum hops</span>
+
+            <strong>
+              {response.max_hops ??
+                "—"}
+            </strong>
+          </div>
+        </section>
+
+        {/* =====================================================
+            SUMMARY
+        ====================================================== */}
+
+        <section className="summary-section">
+          <div className="section-heading">
+            <div>
+              <span className="section-kicker">
+                OVERVIEW
+              </span>
+
+              <h2>
+                Investigation summary
+              </h2>
+            </div>
+          </div>
+
+          <div className="investigator-stat-grid">
+            <StatCard
+              label="Wallets traced"
+              value={summary.wallets}
+              icon="◉"
+            />
+
+            <StatCard
+              label="Transactions"
+              value={summary.transactions}
+              icon="⇄"
+            />
+
+            <StatCard
+              label="Relationships"
+              value={summary.relationships}
+              icon="↗"
+            />
+
+            <StatCard
+              label="Hops"
+              value={summary.hops}
+              icon="⌁"
+            />
+
+            <StatCard
+              label="Known entities"
+              value={summary.known}
+              icon="✓"
+            />
+
+            <StatCard
+              label="Unknown entities"
+              value={summary.unknown}
+              icon="?"
+            />
+          </div>
+
+          <div className="assets-summary">
+            <span>
+              Assets / tokens observed
+            </span>
+
+            <div>
+              {summary.assets.length > 0 ? (
+                summary.assets.map((asset) => (
+                  <span
+                    className="asset-pill"
+                    key={asset}
+                  >
+                    {asset}
+                  </span>
+                ))
+              ) : (
+                <span className="muted">
+                  No asset information
+                </span>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* =====================================================
+            MAIN DASHBOARD
+        ====================================================== */}
+
+        <section className="main-investigation-grid">
+
+          {/* LEFT SIDE */}
+
+          <div className="investigation-main">
+
+            {/* GRAPH */}
+
+            <div className="dashboard-panel graph-panel">
+              <div className="panel-header">
+                <div>
+                  <span className="section-kicker">
+                    FUND FLOW
+                  </span>
+
+                  <h2>
+                    Relationship graph
+                  </h2>
+
+                  <p>
+                    Starting wallet → traced hops
+                  </p>
+                </div>
+
+                <span className="panel-count">
+                  {wallets.length} wallets
+                </span>
+              </div>
+
+              <RelationshipGraph
+                wallets={wallets}
+                edges={edges}
+                selectedWallet={
+                  selectedWallet
+                }
+                onSelectWallet={
+                  handleWalletSelect
+                }
+                onSelectEdge={
+                  handleEdgeSelect
+                }
+              />
+            </div>
+
+            {/* TRANSACTIONS */}
+
+            <div className="dashboard-panel transaction-panel">
+              <div className="panel-header">
+                <div>
+                  <span className="section-kicker">
+                    BLOCKCHAIN EVIDENCE
+                  </span>
+
+                  <h2>
+                    Transactions
+                  </h2>
+
+                  <p>
+                    Real transactions returned
+                    by the investigation.
+                  </p>
+                </div>
+
+                <span className="panel-count">
+                  {transactions.length}
+                </span>
+              </div>
+
+              <TransactionTable
+                transactions={transactions}
+                selectedWallet={
+                  selectedWallet
+                }
+                onSelectTransaction={
+                  setSelectedTransaction
+                }
+              />
+            </div>
+          </div>
+
+          {/* RIGHT SIDE */}
+
+          <aside className="investigation-sidebar">
+
+            {/* WALLET OVERVIEW */}
+
+            <div className="dashboard-panel">
+              <WalletOverview
+                wallet={selectedWallet}
+                edges={edges}
+              />
+            </div>
+
+            {/* TRANSACTION DETAILS */}
+
+            <div className="dashboard-panel">
+              <TransactionDetails
+                transaction={
+                  selectedTransaction
+                }
+                onClose={() =>
+                  setSelectedTransaction(
+                    null
+                  )
+                }
+              />
+            </div>
+
+          </aside>
+        </section>
+
+        {/* =====================================================
+            WALLET LIST
+        ====================================================== */}
+
+        <section className="dashboard-panel wallet-section">
+          <div className="panel-header">
+            <div>
+              <span className="section-kicker">
+                TRACED WALLETS
+              </span>
+
+              <h2>
+                Wallet overview
+              </h2>
+
+              <p>
+                Select a wallet to inspect its
+                activity.
+              </p>
+            </div>
+
+            <div className="wallet-search">
+              <span>⌕</span>
+
+              <input
+                value={search}
+                onChange={(event) =>
+                  setSearch(
+                    event.target.value
+                  )
+                }
+                placeholder="Search address or entity..."
+              />
+            </div>
+          </div>
+
+          {filteredWallets.length === 0 ? (
+            <div className="empty-state compact">
+              <div className="empty-icon">
+                ⌕
+              </div>
+
+              <h3>
+                No matching wallets
+              </h3>
+
+              <p>
+                Try another wallet address or
+                entity name.
+              </p>
+            </div>
+          ) : (
+            <div className="wallet-card-grid">
+              {filteredWallets.map(
+                (wallet) => (
+                  <WalletCard
+                    key={wallet.address}
+                    wallet={wallet}
+                    selected={
+                      selectedWallet?.address?.toLowerCase() ===
+                      wallet.address?.toLowerCase()
+                    }
+                    onClick={() =>
+                      handleWalletSelect(
+                        wallet
+                      )
+                    }
+                  />
+                )
+              )}
+            </div>
+          )}
+        </section>
+
+      </div>
+    </main>
+  );
+}
