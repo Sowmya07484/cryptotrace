@@ -19,14 +19,8 @@ function firstDefined(...values) {
   );
 }
 
-function shortenAddress(
-  address,
-  start = 8,
-  end = 6
-) {
-  if (!address) {
-    return "Unknown";
-  }
+function shortenAddress(address, start = 8, end = 6) {
+  if (!address) return "Unknown";
 
   const text = String(address);
 
@@ -34,10 +28,7 @@ function shortenAddress(
     return text;
   }
 
-  return `${text.slice(
-    0,
-    start
-  )}...${text.slice(-end)}`;
+  return `${text.slice(0, start)}...${text.slice(-end)}`;
 }
 
 function formatNumber(value) {
@@ -58,6 +49,24 @@ function formatNumber(value) {
   return number.toLocaleString();
 }
 
+function formatScore(value) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return "—";
+  }
+
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    return String(value);
+  }
+
+  return number.toFixed(2);
+}
+
 function formatValue(value, asset = "") {
   if (
     value === undefined ||
@@ -71,9 +80,7 @@ function formatValue(value, asset = "") {
 }
 
 function formatTimestamp(timestamp) {
-  if (!timestamp) {
-    return "—";
-  }
+  if (!timestamp) return "—";
 
   const numeric = Number(timestamp);
 
@@ -110,29 +117,159 @@ function toNumber(value) {
     : null;
 }
 
+function normalizeAddress(address) {
+  return String(address || "").toLowerCase();
+}
+
+/* =========================================================
+   ANALYTICS HELPERS
+========================================================= */
+
+function getAnalytics(response) {
+  return (
+    response?.analytics ||
+    response?.investigation_analytics ||
+    {}
+  );
+}
+
+function getEntityProfiles(response) {
+  return (
+    getAnalytics(response)
+      ?.entity_analysis
+      ?.wallet_profiles || []
+  );
+}
+
+function getBehaviorProfiles(response) {
+  return (
+    getAnalytics(response)
+      ?.wallet_behavior
+      ?.wallet_profiles || []
+  );
+}
+
+function getRiskWallets(response) {
+  return (
+    getAnalytics(response)
+      ?.wallet_risks
+      ?.wallet_risks || []
+  );
+}
+
+function getRiskFactorWallets(response) {
+  return (
+    getAnalytics(response)
+      ?.risk_factors
+      ?.wallet_factors || []
+  );
+}
+
+function findEntityProfile(response, address) {
+  const normalized =
+    normalizeAddress(address);
+
+  return getEntityProfiles(response).find(
+    (item) =>
+      normalizeAddress(item?.wallet) ===
+      normalized
+  );
+}
+
+function findBehaviorProfile(response, address) {
+  const normalized =
+    normalizeAddress(address);
+
+  return getBehaviorProfiles(response).find(
+    (item) =>
+      normalizeAddress(item?.wallet) ===
+      normalized
+  );
+}
+
+function findRiskWallet(response, address) {
+  const normalized =
+    normalizeAddress(address);
+
+  return getRiskWallets(response).find(
+    (item) =>
+      normalizeAddress(item?.wallet) ===
+      normalized
+  );
+}
+
+function findRiskFactors(response, address) {
+  const normalized =
+    normalizeAddress(address);
+
+  return getRiskFactorWallets(response).find(
+    (item) =>
+      normalizeAddress(item?.wallet) ===
+      normalized
+  );
+}
+
 /* =========================================================
    ENTITY HELPERS
 ========================================================= */
 
-function getEntityName(wallet) {
-  return firstDefined(
-    wallet?.entity_name,
-    wallet?.entity?.name,
-    wallet?.name_tag,
-    wallet?.entity_tag,
-    wallet?.label,
-    null
-  );
+function getEntityName(wallet, response = null) {
+  const direct =
+    firstDefined(
+      wallet?.entity_name,
+      wallet?.entity?.entity_name,
+      wallet?.entity?.name_tag,
+      wallet?.entity?.name,
+      wallet?.name_tag,
+      wallet?.entity_tag,
+      wallet?.label
+    );
+
+  if (direct) return direct;
+
+  if (response && wallet?.address) {
+    const profile =
+      findEntityProfile(
+        response,
+        wallet.address
+      );
+
+    return firstDefined(
+      profile?.entity?.entity_name,
+      profile?.entity?.name_tag,
+      profile?.entity?.name
+    );
+  }
+
+  return null;
 }
 
-function getEntityCategory(wallet) {
-  return firstDefined(
-    wallet?.entity_category,
-    wallet?.entity?.category,
-    wallet?.category,
-    wallet?.label_category,
-    null
-  );
+function getEntityCategory(wallet, response = null) {
+  const direct =
+    firstDefined(
+      wallet?.entity_category,
+      wallet?.entity?.label_category,
+      wallet?.entity?.category,
+      wallet?.category,
+      wallet?.label_category
+    );
+
+  if (direct) return direct;
+
+  if (response && wallet?.address) {
+    const profile =
+      findEntityProfile(
+        response,
+        wallet.address
+      );
+
+    return firstDefined(
+      profile?.entity?.label_category,
+      profile?.entity?.category
+    );
+  }
+
+  return null;
 }
 
 /* =========================================================
@@ -166,16 +303,6 @@ function getTransactionHash(tx) {
   );
 }
 
-function getTransactionAsset(tx) {
-  return (
-    tx?.token_symbol ||
-    tx?.asset ||
-    tx?.symbol ||
-    tx?.token ||
-    "Unknown"
-  );
-}
-
 function getTransactionType(tx) {
   return (
     tx?.transaction_type ||
@@ -194,6 +321,120 @@ function getTransactionValue(tx) {
   );
 }
 
+/*
+ * Determine the asset.
+ *
+ * Normal ERC-20 transfers normally contain a token symbol.
+ * Native Ethereum transactions may not, so normal ETH
+ * transactions are identified from the transaction type.
+ */
+function getTransactionAsset(tx) {
+  const explicitAsset =
+    firstDefined(
+      tx?.token_symbol,
+      tx?.tokenSymbol,
+      tx?.asset,
+      tx?.symbol
+    );
+
+  if (explicitAsset) {
+    return String(explicitAsset);
+  }
+
+  const type =
+    String(
+      getTransactionType(tx)
+    ).toLowerCase();
+
+  const hasTokenMetadata =
+    tx?.token_decimal !== undefined ||
+    tx?.token_decimals !== undefined ||
+    tx?.tokenDecimal !== undefined ||
+    tx?.decimals !== undefined ||
+    tx?.contract_address !== undefined ||
+    tx?.contractAddress !== undefined;
+
+  if (
+    !hasTokenMetadata &&
+    (
+      type.includes("normal") ||
+      type.includes("internal") ||
+      type.includes("native") ||
+      type === "transaction"
+    )
+  ) {
+    return "ETH";
+  }
+
+  return "Unknown";
+}
+
+/*
+ * Convert raw blockchain values into display values.
+
+ * Native ETH:
+ *   Etherscan txlist values are normally in wei.
+
+ * ERC-20:
+ *   Etherscan tokentx values are normally raw token
+ *   units and tokenDecimal tells us how many decimals
+ *   to divide by.
+ */
+function getDisplayTransactionValue(tx) {
+  const rawValue =
+    getTransactionValue(tx);
+
+  const number =
+    toNumber(rawValue);
+
+  if (number === null) {
+    return null;
+  }
+
+  const asset =
+    String(
+      getTransactionAsset(tx) || ""
+    ).toUpperCase();
+
+  const decimals =
+    toNumber(
+      firstDefined(
+        tx?.tokenDecimal,
+        tx?.token_decimal,
+        tx?.token_decimals,
+        tx?.decimals,
+        null
+      )
+    );
+
+  /*
+   * Native ETH.
+   */
+  if (
+    asset === "ETH" &&
+    Math.abs(number) >= 1e6
+  ) {
+    return number / 1e18;
+  }
+
+  /*
+   * ERC-20 token.
+   */
+  if (
+    decimals !== null &&
+    decimals > 0 &&
+    Math.abs(number) >=
+      10 ** decimals
+  ) {
+    return (
+      number /
+      10 ** decimals
+    );
+  }
+
+  return number;
+}
+
 function getTransactionHop(tx) {
   return firstDefined(
     tx?.hop,
@@ -202,10 +443,7 @@ function getTransactionHop(tx) {
   );
 }
 
-function getDirection(
-  tx,
-  walletAddress = ""
-) {
+function getDirection(tx, walletAddress = "") {
   if (tx?.direction) {
     return String(
       tx.direction
@@ -213,13 +451,19 @@ function getDirection(
   }
 
   const from =
-    getTransactionFrom(tx).toLowerCase();
+    normalizeAddress(
+      getTransactionFrom(tx)
+    );
 
   const to =
-    getTransactionTo(tx).toLowerCase();
+    normalizeAddress(
+      getTransactionTo(tx)
+    );
 
   const wallet =
-    String(walletAddress || "").toLowerCase();
+    normalizeAddress(
+      walletAddress
+    );
 
   if (
     wallet &&
@@ -239,181 +483,659 @@ function getDirection(
 }
 
 /* =========================================================
-   RISK HELPERS
-========================================================= */
-
-function getRiskObject(source) {
-  return (
-    source?.risk_analysis ||
-    source?.risk ||
-    source?.risk_assessment ||
-    source?.riskAssessment ||
-    source?.assessment ||
-    source?.risk_summary ||
-    source?.summary?.risk ||
-    {}
-  );
-}
-
-function getRiskScore(source) {
-  const risk =
-    getRiskObject(source);
-
-  return firstDefined(
-    risk?.overall_risk_score,
-    risk?.risk_score,
-    risk?.score,
-    source?.overall_risk_score,
-    source?.risk_score,
-    null
-  );
-}
-
-function getRiskLevel(source) {
-  const risk =
-    getRiskObject(source);
-
-  return firstDefined(
-    risk?.overall_risk_level,
-    risk?.risk_level,
-    risk?.level,
-    source?.overall_risk_level,
-    source?.risk_level,
-    null
-  );
-}
-
-function getRiskReasons(source) {
-  const risk =
-    getRiskObject(source);
-
-  const reasons =
-    firstDefined(
-      risk?.risk_reasons,
-      risk?.reasons,
-      risk?.risk_factors,
-      risk?.factors,
-      source?.risk_reasons,
-      source?.risk_factors,
-      []
-    );
-
-  if (Array.isArray(reasons)) {
-    return reasons;
-  }
-
-  if (typeof reasons === "string") {
-    return [reasons];
-  }
-
-  return [];
-}
-
-function getWalletRisk(wallet) {
-  const nestedRisk =
-    wallet?.risk ||
-    wallet?.risk_analysis ||
-    {};
-
-  return {
-    score: firstDefined(
-      wallet?.risk_score,
-      wallet?.overall_risk_score,
-      nestedRisk?.overall_risk_score,
-      nestedRisk?.risk_score,
-      nestedRisk?.score,
-      null
-    ),
-
-    level: firstDefined(
-      wallet?.risk_level,
-      wallet?.overall_risk_level,
-      nestedRisk?.overall_risk_level,
-      nestedRisk?.risk_level,
-      nestedRisk?.level,
-      null
-    ),
-
-    reasons:
-      wallet?.risk_reasons ||
-      wallet?.risk_factors ||
-      nestedRisk?.risk_reasons ||
-      nestedRisk?.reasons ||
-      nestedRisk?.risk_factors ||
-      nestedRisk?.factors ||
-      [],
-  };
-}
-
-function normalizeRiskLevel(level) {
-  if (!level) {
-    return "unknown";
-  }
-
-  return String(level)
-    .toLowerCase()
-    .replace(/\s+/g, "-");
-}
-
-/* =========================================================
-   WALLET HELPERS
+   WALLET TRANSACTIONS
 ========================================================= */
 
 function getWalletTransactions(
   wallet,
   allTransactions
 ) {
-  if (
-    Array.isArray(wallet?.transactions)
-  ) {
-    return wallet.transactions;
-  }
-
   if (!wallet?.address) {
     return [];
   }
 
   const address =
-    wallet.address.toLowerCase();
+    normalizeAddress(
+      wallet.address
+    );
 
-  return allTransactions.filter(
+  /*
+   * Always prefer the complete top-level
+   * investigation transaction list.
+   *
+   * This prevents incomplete wallet.transactions
+   * arrays from hiding transactions.
+   */
+  if (
+    Array.isArray(allTransactions) &&
+    allTransactions.length > 0
+  ) {
+    return allTransactions.filter(
+      (tx) =>
+        normalizeAddress(
+          getTransactionFrom(tx)
+        ) === address ||
+        normalizeAddress(
+          getTransactionTo(tx)
+        ) === address
+    );
+  }
+
+  if (
+    Array.isArray(
+      wallet?.transactions
+    )
+  ) {
+    return wallet.transactions;
+  }
+
+  return [];
+}
+
+/* =========================================================
+   VALUE ANALYTICS
+========================================================= */
+
+function getWalletValueBreakdown(
+  wallet,
+  allTransactions
+) {
+  const incoming = {};
+  const outgoing = {};
+
+  if (!wallet?.address) {
+    return {
+      incoming,
+      outgoing,
+      net: {},
+      total: {},
+    };
+  }
+
+  const walletTransactions =
+    getWalletTransactions(
+      wallet,
+      allTransactions
+    );
+
+  walletTransactions.forEach(
     (tx) => {
-      const from =
-        getTransactionFrom(tx).toLowerCase();
+      const direction =
+        getDirection(
+          tx,
+          wallet.address
+        );
 
-      const to =
-        getTransactionTo(tx).toLowerCase();
+      if (
+        direction !== "incoming" &&
+        direction !== "outgoing"
+      ) {
+        return;
+      }
 
-      return (
-        from === address ||
-        to === address
-      );
+      const asset =
+        getTransactionAsset(tx);
+
+      const value =
+        getDisplayTransactionValue(
+          tx
+        );
+
+      if (
+        !asset ||
+        asset === "Unknown" ||
+        value === null
+      ) {
+        return;
+      }
+
+      if (
+        direction === "incoming"
+      ) {
+        incoming[asset] =
+          (incoming[asset] || 0) +
+          value;
+      }
+
+      if (
+        direction === "outgoing"
+      ) {
+        outgoing[asset] =
+          (outgoing[asset] || 0) +
+          value;
+      }
+    }
+  );
+
+  const assets =
+    new Set([
+      ...Object.keys(incoming),
+      ...Object.keys(outgoing),
+    ]);
+
+  const net = {};
+  const total = {};
+
+  assets.forEach(
+    (asset) => {
+      const inValue =
+        incoming[asset] || 0;
+
+      const outValue =
+        outgoing[asset] || 0;
+
+      net[asset] =
+        inValue - outValue;
+
+      total[asset] =
+        inValue + outValue;
+    }
+  );
+
+  return {
+    incoming,
+    outgoing,
+    net,
+    total,
+  };
+}
+
+function formatAssetAmount(value) {
+  const number =
+    Number(value);
+
+  if (
+    !Number.isFinite(number)
+  ) {
+    return "—";
+  }
+
+  if (number === 0) {
+    return "0";
+  }
+
+  if (
+    Math.abs(number) >= 1000
+  ) {
+    return number.toLocaleString(
+      undefined,
+      {
+        maximumFractionDigits: 4,
+      }
+    );
+  }
+
+  return number.toLocaleString(
+    undefined,
+    {
+      maximumFractionDigits: 8,
     }
   );
 }
 
-function getWalletAssets(
-  wallet,
-  transactions
+function formatAssetBreakdown(
+  breakdown
 ) {
-  const backendAssets =
-    firstDefined(
-      wallet?.assets,
-      wallet?.assets_tokens,
-      wallet?.tokens,
-      null
-    );
-
-  if (Array.isArray(backendAssets)) {
-    return backendAssets;
+  if (
+    !breakdown ||
+    Object.keys(
+      breakdown
+    ).length === 0
+  ) {
+    return "—";
   }
 
-  const set = new Set();
+  return Object.entries(
+    breakdown
+  )
+    .filter(
+      ([, value]) =>
+        Number.isFinite(
+          Number(value)
+        )
+    )
+    .map(
+      ([asset, value]) =>
+        `${formatAssetAmount(
+          value
+        )} ${asset}`
+    )
+    .join(" • ");
+}
+
+/* =========================================================
+   RISK HELPERS
+========================================================= */
+
+function normalizeRiskLevel(level) {
+  if (!level) return "unknown";
+
+  return String(level)
+    .toLowerCase()
+    .replace(/\s+/g, "-");
+}
+
+function getWalletRisk(
+  wallet,
+  response
+) {
+  const backendRisk =
+    findRiskWallet(
+      response,
+      wallet?.address
+    );
+
+  if (backendRisk) {
+    return {
+      score:
+        backendRisk.risk_score ??
+        null,
+
+      level:
+        backendRisk.risk_level ??
+        null,
+
+      reasons:
+        Array.isArray(
+          backendRisk.factors
+        )
+          ? backendRisk.factors
+          : [],
+    };
+  }
+
+  return {
+    score:
+      wallet?.risk_score ??
+      wallet?.overall_risk_score ??
+      null,
+
+    level:
+      wallet?.risk_level ??
+      wallet?.overall_risk_level ??
+      null,
+
+    reasons:
+      Array.isArray(
+        wallet?.risk_factors
+      )
+        ? wallet.risk_factors
+        : [],
+  };
+}
+
+function formatRiskFactorName(
+  factor
+) {
+  if (!factor) {
+    return "Risk factor";
+  }
+
+  return String(factor)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) =>
+      char.toUpperCase()
+    );
+}
+
+function formatRiskFactorValue(
+  factor,
+  value
+) {
+  if (
+    value === undefined ||
+    value === null ||
+    value === ""
+  ) {
+    return null;
+  }
+
+  const normalized =
+    String(factor || "")
+      .toLowerCase();
+
+  if (
+    normalized.includes(
+      "transaction_activity"
+    )
+  ) {
+    return `${formatNumber(
+      value
+    )} transactions`;
+  }
+
+  if (
+    normalized.includes(
+      "counterparty"
+    )
+  ) {
+    return `${formatNumber(
+      value
+    )} counterparties`;
+  }
+
+  if (
+    normalized.includes(
+      "asset_diversity"
+    )
+  ) {
+    return `${formatNumber(
+      value
+    )} assets`;
+  }
+
+  if (
+    normalized.includes(
+      "incoming_dominance"
+    )
+  ) {
+    const numeric =
+      Number(value);
+
+    if (
+      !Number.isFinite(
+        numeric
+      )
+    ) {
+      return String(value);
+    }
+
+    const percentage =
+      numeric <= 1
+        ? numeric * 100
+        : numeric;
+
+    return `${percentage.toFixed(
+      2
+    )}% incoming`;
+  }
+
+  if (
+    normalized.includes(
+      "outgoing_dominance"
+    )
+  ) {
+    const numeric =
+      Number(value);
+
+    if (
+      !Number.isFinite(
+        numeric
+      )
+    ) {
+      return String(value);
+    }
+
+    const percentage =
+      numeric <= 1
+        ? numeric * 100
+        : numeric;
+
+    return `${percentage.toFixed(
+      2
+    )}% outgoing`;
+  }
+
+  if (
+    normalized.includes(
+      "fan_in"
+    )
+  ) {
+    return `${formatNumber(
+      value
+    )} wallet relationships`;
+  }
+
+  if (
+    normalized.includes(
+      "fan_out"
+    )
+  ) {
+    return `${formatNumber(
+      value
+    )} wallet relationships`;
+  }
+
+  /*
+   * FIX:
+   * intermediary_behavior.value is an object,
+   * so never render it directly.
+   */
+  if (
+    normalized.includes(
+      "intermediary"
+    )
+  ) {
+    if (
+      typeof value ===
+      "object"
+    ) {
+      const incoming =
+        firstDefined(
+          value?.incoming_count,
+          value?.incoming,
+          null
+        );
+
+      const outgoing =
+        firstDefined(
+          value?.outgoing_count,
+          value?.outgoing,
+          null
+        );
+
+      if (
+        incoming !== null &&
+        outgoing !== null
+      ) {
+        return `${formatNumber(
+          incoming
+        )} incoming · ${formatNumber(
+          outgoing
+        )} outgoing`;
+      }
+
+      return "Intermediary behavior detected";
+    }
+
+    return String(value);
+  }
+
+  if (
+    normalized.includes(
+      "known_entity"
+    )
+  ) {
+    return value === true
+      ? "Known entity"
+      : String(value);
+  }
+
+  if (
+    normalized.includes(
+      "unknown_entity"
+    )
+  ) {
+    return value === true
+      ? "Entity is unknown"
+      : String(value);
+  }
+
+  if (
+    typeof value ===
+    "object"
+  ) {
+    return null;
+  }
+
+  return String(value);
+}
+
+function renderRiskReason(reason) {
+  if (
+    reason &&
+    typeof reason ===
+      "object"
+  ) {
+    const factor =
+      firstDefined(
+        reason.factor,
+        reason.name,
+        reason.reason
+      );
+
+    const value =
+      reason.value;
+
+    const points =
+      firstDefined(
+        reason.contribution,
+        reason.points,
+        reason.score,
+        null
+      );
+
+    const explanation =
+      firstDefined(
+        reason.explanation,
+        reason.description,
+        null
+      );
+
+    if (factor) {
+      const readableFactor =
+        formatRiskFactorName(
+          factor
+        );
+
+      const readableValue =
+        formatRiskFactorValue(
+          factor,
+          value
+        );
+
+      return (
+        <div className="risk-reason-content">
+          <strong>
+            {readableFactor}
+          </strong>
+
+          {explanation && (
+            <p className="risk-reason-explanation">
+              {explanation}
+            </p>
+          )}
+
+          <div className="risk-reason-meta">
+            {readableValue && (
+              <span>
+                {readableValue}
+              </span>
+            )}
+
+            {points !== null &&
+              points !==
+                undefined && (
+                <span className="risk-points">
+                  +
+                  {formatScore(
+                    points
+                  )}{" "}
+                  risk points
+                </span>
+              )}
+          </div>
+        </div>
+      );
+    }
+
+    if (
+      reason.description ||
+      reason.reason
+    ) {
+      return (
+        <div className="risk-reason-content">
+          <strong>
+            {reason.description ||
+              reason.reason}
+          </strong>
+        </div>
+      );
+    }
+  }
+
+  return (
+    <div className="risk-reason-content">
+      <strong>
+        {String(reason)}
+      </strong>
+    </div>
+  );
+}
+
+/* =========================================================
+   WALLET HELPERS
+========================================================= */
+
+function getWalletBehavior(
+  wallet,
+  response
+) {
+  const profile =
+    findBehaviorProfile(
+      response,
+      wallet?.address
+    );
+
+  return profile?.behavior || {};
+}
+
+function getWalletAssets(
+  wallet,
+  transactions,
+  response
+) {
+  const behavior =
+    getWalletBehavior(
+      wallet,
+      response
+    );
+
+  if (
+    Array.isArray(
+      behavior.assets
+    ) &&
+    behavior.assets.length
+  ) {
+    return behavior.assets;
+  }
+
+  const entityProfile =
+    findEntityProfile(
+      response,
+      wallet?.address
+    );
+
+  if (
+    Array.isArray(
+      entityProfile?.activity
+        ?.assets
+    ) &&
+    entityProfile.activity
+      .assets.length
+  ) {
+    return entityProfile.activity.assets;
+  }
+
+  const set =
+    new Set();
 
   transactions.forEach(
     (tx) => {
       const asset =
-        getTransactionAsset(tx);
+        getTransactionAsset(
+          tx
+        );
 
       if (asset) {
         set.add(asset);
@@ -426,7 +1148,8 @@ function getWalletAssets(
 
 function getWalletStats(
   wallet,
-  allTransactions
+  allTransactions,
+  response
 ) {
   const transactions =
     getWalletTransactions(
@@ -434,78 +1157,31 @@ function getWalletStats(
       allTransactions
     );
 
-  let incoming = 0;
-  let outgoing = 0;
+  const behavior =
+    getWalletBehavior(
+      wallet,
+      response
+    );
 
-  const counterparties =
-    new Set();
-
-  transactions.forEach(
-    (tx) => {
-      const direction =
-        getDirection(
-          tx,
-          wallet?.address || ""
-        );
-
-      if (
-        direction === "incoming"
-      ) {
-        incoming += 1;
-      }
-
-      if (
-        direction === "outgoing"
-      ) {
-        outgoing += 1;
-      }
-
-      const from =
-        getTransactionFrom(tx);
-
-      const to =
-        getTransactionTo(tx);
-
-      if (
-        direction === "incoming" &&
-        from
-      ) {
-        counterparties.add(
-          from.toLowerCase()
-        );
-      }
-
-      if (
-        direction === "outgoing" &&
-        to
-      ) {
-        counterparties.add(
-          to.toLowerCase()
-        );
-      }
-    }
-  );
-
-  const backendIncoming =
+  const incoming =
     firstDefined(
+      behavior.incoming_transaction_count,
       wallet?.incoming_transaction_count,
       wallet?.incoming_count,
-      wallet?.incoming_transactions,
       null
     );
 
-  const backendOutgoing =
+  const outgoing =
     firstDefined(
+      behavior.outgoing_transaction_count,
       wallet?.outgoing_transaction_count,
       wallet?.outgoing_count,
-      wallet?.outgoing_transactions,
       null
     );
 
-  const backendCounterparties =
+  const counterparties =
     firstDefined(
-      wallet?.unique_counterpart_count,
-      wallet?.counterpart_count,
+      behavior.unique_counterparties,
       wallet?.unique_counterparties,
       null
     );
@@ -514,27 +1190,43 @@ function getWalletStats(
     transactions:
       firstDefined(
         wallet?.transaction_count,
-        wallet?.transactions_count,
         transactions.length
       ),
 
     incoming:
-      backendIncoming ??
-      incoming,
+      incoming ??
+      transactions.filter(
+        (tx) =>
+          getDirection(
+            tx,
+            wallet?.address
+          ) === "incoming"
+      ).length,
 
     outgoing:
-      backendOutgoing ??
-      outgoing,
+      outgoing ??
+      transactions.filter(
+        (tx) =>
+          getDirection(
+            tx,
+            wallet?.address
+          ) === "outgoing"
+      ).length,
 
     counterparties:
-      backendCounterparties ??
-      counterparties.size,
+      counterparties ??
+      0,
 
     assets:
       getWalletAssets(
         wallet,
-        transactions
+        transactions,
+        response
       ),
+
+    activityDirection:
+      behavior.activity_direction ||
+      null,
   };
 }
 
@@ -617,56 +1309,50 @@ function normalizeEdges(
     );
   }
 
-  if (
-    Array.isArray(transactions)
-  ) {
-    return transactions
-      .filter(
-        (tx) =>
-          getTransactionFrom(tx) &&
-          getTransactionTo(tx)
-      )
-      .map(
-        (tx, index) => ({
-          id:
-            getTransactionHash(tx) ||
-            `tx-edge-${index}`,
+  return transactions
+    .filter(
+      (tx) =>
+        getTransactionFrom(tx) &&
+        getTransactionTo(tx)
+    )
+    .map(
+      (tx, index) => ({
+        id:
+          getTransactionHash(tx) ||
+          `tx-edge-${index}`,
 
-          from:
-            getTransactionFrom(tx),
+        from:
+          getTransactionFrom(tx),
 
-          to:
-            getTransactionTo(tx),
+        to:
+          getTransactionTo(tx),
 
-          hash:
-            getTransactionHash(tx),
+        hash:
+          getTransactionHash(tx),
 
-          asset:
-            getTransactionAsset(tx),
+        asset:
+          getTransactionAsset(tx),
 
-          value:
-            getTransactionValue(tx),
+        value:
+          getTransactionValue(tx),
 
-          transactionType:
-            getTransactionType(tx),
+        transactionType:
+          getTransactionType(tx),
 
-          direction:
-            getDirection(
-              tx,
-              walletAddress
-            ),
+        direction:
+          getDirection(
+            tx,
+            walletAddress
+          ),
 
-          hop:
-            getTransactionHop(tx),
+        hop:
+          getTransactionHop(tx),
 
-          timestamp:
-            tx?.timestamp ||
-            null,
-        })
-      );
-  }
-
-  return [];
+        timestamp:
+          tx?.timestamp ||
+          null,
+      })
+    );
 }
 
 /* =========================================================
@@ -697,9 +1383,7 @@ function StatCard({
   );
 }
 
-function RiskBadge({
-  level,
-}) {
+function RiskBadge({ level }) {
   const normalized =
     normalizeRiskLevel(level);
 
@@ -707,19 +1391,31 @@ function RiskBadge({
     <span
       className={`risk-badge ${normalized}`}
     >
-      {level || "Not provided"}
+      {level
+        ? String(level)
+            .charAt(0)
+            .toUpperCase() +
+          String(level).slice(1)
+        : "Not provided"}
     </span>
   );
 }
 
 function EntityBadge({
   wallet,
+  response,
 }) {
   const entity =
-    getEntityName(wallet);
+    getEntityName(
+      wallet,
+      response
+    );
 
   const category =
-    getEntityCategory(wallet);
+    getEntityCategory(
+      wallet,
+      response
+    );
 
   if (!entity && !category) {
     return (
@@ -753,103 +1449,88 @@ function EntityBadge({
 
 function RiskSummary({
   response,
-  wallets,
 }) {
-  const riskScore =
-    getRiskScore(response);
-
-  const riskLevel =
-    getRiskLevel(response);
-
-  let riskReasons =
-    getRiskReasons(response);
-
-  /*
-   * If overall risk reasons are not present,
-   * collect wallet-level reasons.
-   */
-  if (
-    riskReasons.length === 0
-  ) {
-    const collected = [];
-
-    wallets.forEach(
-      (wallet) => {
-        const walletRisk =
-          getWalletRisk(wallet);
-
-        if (
-          Array.isArray(
-            walletRisk.reasons
-          )
-        ) {
-          walletRisk.reasons.forEach(
-            (reason) => {
-              collected.push(
-                reason
-              );
-            }
-          );
-        }
-      }
+  const riskWallets =
+    getRiskWallets(
+      response
     );
 
-    riskReasons = collected;
-  }
+  const riskSummary =
+    getAnalytics(response)
+      ?.wallet_risks
+      ?.summary || {};
 
-  const risk =
-    getRiskObject(response);
+  const calculatedAverage =
+    riskWallets.length
+      ? riskWallets.reduce(
+          (sum, item) =>
+            sum +
+            Number(
+              item.risk_score || 0
+            ),
+          0
+        ) /
+        riskWallets.length
+      : null;
 
-  const distribution =
+  const riskScore =
     firstDefined(
-      risk?.wallet_distribution,
-      risk?.risk_distribution,
-      response?.wallet_risk_distribution,
-      response?.risk_distribution,
-      {}
+      riskSummary?.overall_risk_score,
+      riskSummary?.average_risk_score,
+      calculatedAverage,
+      null
     );
 
   const high =
     firstDefined(
-      distribution?.high,
-      risk?.high_risk_wallets,
-      response?.high_risk_wallets,
-      wallets.filter(
-        (wallet) =>
-          normalizeRiskLevel(
-            getWalletRisk(wallet)
-              .level
-          ) === "high"
-      ).length
+      riskSummary.high_risk_wallets,
+      0
     );
 
   const medium =
     firstDefined(
-      distribution?.medium,
-      risk?.medium_risk_wallets,
-      response?.medium_risk_wallets,
-      wallets.filter(
-        (wallet) =>
-          normalizeRiskLevel(
-            getWalletRisk(wallet)
-              .level
-          ) === "medium"
-      ).length
+      riskSummary.medium_risk_wallets,
+      0
     );
 
   const low =
     firstDefined(
-      distribution?.low,
-      risk?.low_risk_wallets,
-      response?.low_risk_wallets,
-      wallets.filter(
-        (wallet) =>
-          normalizeRiskLevel(
-            getWalletRisk(wallet)
-              .level
-          ) === "low"
-      ).length
+      riskSummary.low_risk_wallets,
+      0
     );
+
+  const majorFactors =
+    useMemo(() => {
+      const factors =
+        getRiskFactorWallets(
+          response
+        ).flatMap(
+          (wallet) =>
+            Array.isArray(
+              wallet?.factors
+            )
+              ? wallet.factors.map(
+                  (factor) => ({
+                    ...factor,
+                    wallet:
+                      wallet.wallet,
+                  })
+                )
+              : []
+        );
+
+      return factors
+        .sort(
+          (a, b) =>
+            Number(
+              b.contribution || 0
+            ) -
+            Number(
+              a.contribution || 0
+            )
+        )
+        .slice(0, 8);
+    }, [response]);
 
   return (
     <section className="risk-summary-section">
@@ -864,9 +1545,10 @@ function RiskSummary({
           </h2>
 
           <p>
-            Risk values shown here are
-            supplied by the
-            investigation API.
+            Wallet-level risk scores
+            and factors are supplied
+            by the investigation
+            analytics.
           </p>
         </div>
       </div>
@@ -874,21 +1556,24 @@ function RiskSummary({
       <div className="risk-overview-grid">
         <div className="overall-risk-card">
           <span>
-            Overall risk score
+            Average wallet risk score
           </span>
 
           <strong>
-            {riskScore !== null &&
-            riskScore !== undefined
-              ? formatNumber(
+            {riskScore !== null
+              ? formatScore(
                   riskScore
                 )
               : "Not provided"}
           </strong>
 
-          <RiskBadge
-            level={riskLevel}
-          />
+          <span className="risk-summary-note">
+            Across{" "}
+            {formatNumber(
+              riskWallets.length
+            )}{" "}
+            traced wallets
+          </span>
         </div>
 
         <div className="risk-distribution-card">
@@ -945,39 +1630,30 @@ function RiskSummary({
           </h3>
         </div>
 
-        {riskReasons.length ===
+        {majorFactors.length ===
         0 ? (
           <div className="not-provided">
-            No risk reasons were
+            No risk factors were
             provided by the API.
           </div>
         ) : (
           <div className="risk-reason-list">
-            {riskReasons.map(
+            {majorFactors.map(
               (
                 reason,
                 index
               ) => (
                 <div
                   className="risk-reason"
-                  key={`${JSON.stringify(
-                    reason
-                  )}-${index}`}
+                  key={`${reason.name || reason.factor}-${reason.wallet}-${index}`}
                 >
-                  <span>•</span>
-
-                  <span>
-                    {typeof reason ===
-                    "object"
-                      ? reason.reason ||
-                        reason.description ||
-                        JSON.stringify(
-                          reason
-                        )
-                      : String(
-                          reason
-                        )}
+                  <span className="risk-reason-bullet">
+                    •
                   </span>
+
+                  {renderRiskReason(
+                    reason
+                  )}
                 </div>
               )
             )}
@@ -996,152 +1672,116 @@ function InvestigationSummary({
   response,
   wallets,
   transactions,
-  edges,
 }) {
-  const summary =
-    response?.summary || {};
-
   const analytics =
-    response?.analytics ||
-    response?.investigation_analytics ||
-    {};
+    getAnalytics(response);
 
-  const walletIncoming =
-    wallets.reduce(
-      (total, wallet) => {
-        const value =
-          firstDefined(
-            wallet?.incoming_transaction_count,
-            wallet?.incoming_count,
-            null
-          );
+  const entitySummary =
+    analytics
+      ?.entity_analysis
+      ?.summary || {};
 
-        return (
-          total +
-          (toNumber(value) ||
-            0)
-        );
-      },
-      0
-    );
+  const behaviorSummary =
+    analytics
+      ?.wallet_behavior
+      ?.summary || {};
 
-  const walletOutgoing =
-    wallets.reduce(
-      (total, wallet) => {
-        const value =
-          firstDefined(
-            wallet?.outgoing_transaction_count,
-            wallet?.outgoing_count,
-            null
-          );
-
-        return (
-          total +
-          (toNumber(value) ||
-            0)
-        );
-      },
-      0
-    );
-
-  const incoming =
-    firstDefined(
-      analytics?.incoming_transactions,
-      analytics?.incoming_count,
-      summary?.incoming_transactions,
-      summary?.incoming_count,
-      response?.incoming_transaction_count,
-      wallets.length > 0
-        ? walletIncoming
-        : null
-    );
-
-  const outgoing =
-    firstDefined(
-      analytics?.outgoing_transactions,
-      analytics?.outgoing_count,
-      summary?.outgoing_transactions,
-      summary?.outgoing_count,
-      response?.outgoing_transaction_count,
-      wallets.length > 0
-        ? walletOutgoing
-        : null
-    );
-
-  const incomingValue =
-    firstDefined(
-      analytics?.incoming_value,
-      analytics?.total_incoming_value,
-      summary?.incoming_value,
-      response?.incoming_value,
-      null
-    );
-
-  const outgoingValue =
-    firstDefined(
-      analytics?.outgoing_value,
-      analytics?.total_outgoing_value,
-      summary?.outgoing_value,
-      response?.outgoing_value,
-      null
-    );
-
-  const totalValue =
-    firstDefined(
-      analytics?.total_value,
-      summary?.total_value,
-      response?.total_value,
-      null
-    );
-
-  const netValue =
-    firstDefined(
-      analytics?.net_value,
-      summary?.net_value,
-      response?.net_value,
-      null
-    );
+  const behaviorMetrics =
+    analytics
+      ?.behavioral_analysis
+      ?.metrics || {};
 
   const walletsCount =
     firstDefined(
-      summary?.total_wallets_traced,
-      summary?.wallets_traced,
-      response?.total_wallets_traced,
-      wallets.length
+      entitySummary.wallets_analyzed,
+      behaviorSummary.wallets_analyzed,
+      response?.wallets?.length,
+      0
     );
 
   const transactionsCount =
     firstDefined(
-      summary?.total_transactions,
-      transactions.length
+      entitySummary.transactions_analyzed,
+      behaviorSummary.transactions_analyzed,
+      response?.transactions?.length,
+      0
     );
 
   const relationshipsCount =
     firstDefined(
-      summary?.total_relationships,
-      edges.length
+      entitySummary.edges_analyzed,
+      behaviorSummary.edges_analyzed,
+      response?.edges?.length,
+      0
+    );
+
+  const startingWalletAddress =
+    response?.wallet_address ||
+    wallets.find(
+      (wallet) =>
+        Number(wallet?.hop) === 0
+    )?.address ||
+    "";
+
+  const startingWallet =
+    wallets.find(
+      (wallet) =>
+        normalizeAddress(
+          wallet?.address
+        ) ===
+        normalizeAddress(
+          startingWalletAddress
+        )
+    ) || null;
+
+  const valueBreakdown =
+    getWalletValueBreakdown(
+      startingWallet,
+      transactions
+    );
+
+  const incomingValue =
+    formatAssetBreakdown(
+      valueBreakdown.incoming
+    );
+
+  const outgoingValue =
+    formatAssetBreakdown(
+      valueBreakdown.outgoing
+    );
+
+  const netValue =
+    formatAssetBreakdown(
+      valueBreakdown.net
+    );
+
+  const totalValue =
+    formatAssetBreakdown(
+      valueBreakdown.total
+    );
+
+  const incomingWallets =
+    firstDefined(
+      behaviorMetrics.wallets_with_incoming,
+      0
+    );
+
+  const outgoingWallets =
+    firstDefined(
+      behaviorMetrics.wallets_with_outgoing,
+      0
     );
 
   const known =
     firstDefined(
-      summary?.known_entities,
-      response?.known_entities,
-      wallets.filter(
-        (wallet) =>
-          getEntityName(wallet) ||
-          getEntityCategory(wallet)
-      ).length
+      entitySummary.known_wallets,
+      0
     );
 
   const unknown =
     firstDefined(
-      summary?.unknown_entities,
-      response?.unknown_entities,
-      Math.max(
-        0,
-        wallets.length -
-          Number(known || 0)
-      )
+      entitySummary.unknown_wallets,
+      0
     );
 
   return (
@@ -1181,25 +1821,17 @@ function InvestigationSummary({
         />
 
         <StatCard
-          label="Incoming"
-          value={
-            incoming === null
-              ? "—"
-              : formatNumber(
-                  incoming
-                )
-          }
+          label="Wallets with incoming"
+          value={formatNumber(
+            incomingWallets
+          )}
         />
 
         <StatCard
-          label="Outgoing"
-          value={
-            outgoing === null
-              ? "—"
-              : formatNumber(
-                  outgoing
-                )
-          }
+          label="Wallets with outgoing"
+          value={formatNumber(
+            outgoingWallets
+          )}
         />
 
         <StatCard
@@ -1218,24 +1850,12 @@ function InvestigationSummary({
 
         <StatCard
           label="Total value"
-          value={
-            totalValue === null
-              ? "—"
-              : formatNumber(
-                  totalValue
-                )
-          }
+          value={totalValue}
         />
 
         <StatCard
           label="Net value"
-          value={
-            netValue === null
-              ? "—"
-              : formatNumber(
-                  netValue
-                )
-          }
+          value={netValue}
         />
       </div>
 
@@ -1246,12 +1866,7 @@ function InvestigationSummary({
           </span>
 
           <strong>
-            {incomingValue ===
-            null
-              ? "Not provided"
-              : formatNumber(
-                  incomingValue
-                )}
+            {incomingValue}
           </strong>
         </div>
 
@@ -1261,12 +1876,7 @@ function InvestigationSummary({
           </span>
 
           <strong>
-            {outgoingValue ===
-            null
-              ? "Not provided"
-              : formatNumber(
-                  outgoingValue
-                )}
+            {outgoingValue}
           </strong>
         </div>
       </div>
@@ -1286,10 +1896,7 @@ function FilterBar({
   transactionTypes,
   hops,
 }) {
-  function update(
-    name,
-    value
-  ) {
+  function update(name, value) {
     setFilters(
       (current) => ({
         ...current,
@@ -1476,6 +2083,7 @@ function WalletRiskTable({
   wallets,
   selectedWallet,
   onSelectWallet,
+  response,
 }) {
   if (
     wallets.length === 0
@@ -1493,22 +2101,12 @@ function WalletRiskTable({
       <table className="risk-table">
         <thead>
           <tr>
-            <th>
-              Wallet
-            </th>
+            <th>Wallet</th>
             <th>Hop</th>
-            <th>
-              Entity
-            </th>
-            <th>
-              Risk score
-            </th>
-            <th>
-              Risk level
-            </th>
-            <th>
-              Transactions
-            </th>
+            <th>Entity</th>
+            <th>Risk score</th>
+            <th>Risk level</th>
+            <th>Transactions</th>
           </tr>
         </thead>
 
@@ -1517,14 +2115,17 @@ function WalletRiskTable({
             (wallet) => {
               const risk =
                 getWalletRisk(
-                  wallet
+                  wallet,
+                  response
                 );
 
               const selected =
-                selectedWallet?.address
-                  ?.toLowerCase() ===
-                wallet.address
-                  ?.toLowerCase();
+                normalizeAddress(
+                  selectedWallet?.address
+                ) ===
+                normalizeAddress(
+                  wallet.address
+                );
 
               return (
                 <tr
@@ -1560,6 +2161,9 @@ function WalletRiskTable({
                       wallet={
                         wallet
                       }
+                      response={
+                        response
+                      }
                     />
                   </td>
 
@@ -1569,7 +2173,7 @@ function WalletRiskTable({
                     risk.score ===
                       undefined
                       ? "Not provided"
-                      : formatNumber(
+                      : formatScore(
                           risk.score
                         )}
                   </td>
@@ -1586,7 +2190,6 @@ function WalletRiskTable({
                     {formatNumber(
                       firstDefined(
                         wallet?.transaction_count,
-                        wallet?.transactions_count,
                         wallet?.transactions
                           ?.length,
                         0
@@ -1610,6 +2213,7 @@ function WalletRiskTable({
 function WalletDetail({
   wallet,
   transactions,
+  response,
 }) {
   if (!wallet) {
     return (
@@ -1623,11 +2227,22 @@ function WalletDetail({
   const stats =
     getWalletStats(
       wallet,
-      transactions
+      transactions,
+      response
     );
 
   const risk =
-    getWalletRisk(wallet);
+    getWalletRisk(
+      wallet,
+      response
+    );
+
+  const riskFactors =
+    Array.isArray(
+      risk.reasons
+    )
+      ? risk.reasons
+      : [];
 
   const walletTransactions =
     getWalletTransactions(
@@ -1635,19 +2250,40 @@ function WalletDetail({
       transactions
     );
 
+  const valueBreakdown =
+    getWalletValueBreakdown(
+      wallet,
+      transactions
+    );
+
   const incomingValue =
-    wallet?.incoming_value ??
-    wallet?.total_incoming_value ??
-    wallet?.analytics
-      ?.incoming_value ??
-    null;
+    formatAssetBreakdown(
+      valueBreakdown.incoming
+    );
 
   const outgoingValue =
-    wallet?.outgoing_value ??
-    wallet?.total_outgoing_value ??
-    wallet?.analytics
-      ?.outgoing_value ??
-    null;
+    formatAssetBreakdown(
+      valueBreakdown.outgoing
+    );
+
+  const netValue =
+    formatAssetBreakdown(
+      valueBreakdown.net
+    );
+
+  const totalValue =
+    formatAssetBreakdown(
+      valueBreakdown.total
+    );
+
+  const entityProfile =
+    findEntityProfile(
+      response,
+      wallet.address
+    );
+
+  const entity =
+    entityProfile?.entity;
 
   return (
     <div className="wallet-detail">
@@ -1687,7 +2323,7 @@ function WalletDetail({
             risk.score ===
               undefined
               ? "Not provided"
-              : formatNumber(
+              : formatScore(
                   risk.score
                 )}
           </strong>
@@ -1699,8 +2335,11 @@ function WalletDetail({
           </span>
 
           <strong>
-            {risk.level ||
-              "Not provided"}
+            {risk.level
+              ? String(
+                  risk.level
+                )
+              : "Not provided"}
           </strong>
         </div>
 
@@ -1717,8 +2356,28 @@ function WalletDetail({
       <div className="wallet-detail-entity">
         <EntityBadge
           wallet={wallet}
+          response={response}
         />
       </div>
+
+      {entity && (
+        <div className="wallet-entity-source">
+          <span>
+            Source
+          </span>
+
+          <strong>
+            {entity.source ||
+              "—"}
+          </strong>
+
+          {entity.confidence && (
+            <span>
+              {entity.confidence}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="wallet-activity-grid">
         <div>
@@ -1770,6 +2429,8 @@ function WalletDetail({
         </div>
       </div>
 
+      {/* VALUE CARDS */}
+
       <div className="wallet-value-grid">
         <div>
           <span>
@@ -1777,12 +2438,7 @@ function WalletDetail({
           </span>
 
           <strong>
-            {incomingValue ===
-            null
-              ? "Not provided"
-              : formatNumber(
-                  incomingValue
-                )}
+            {incomingValue}
           </strong>
         </div>
 
@@ -1792,47 +2448,62 @@ function WalletDetail({
           </span>
 
           <strong>
-            {outgoingValue ===
-            null
-              ? "Not provided"
-              : formatNumber(
-                  outgoingValue
-                )}
+            {outgoingValue}
+          </strong>
+        </div>
+
+        <div>
+          <span>
+            Net value
+          </span>
+
+          <strong>
+            {netValue}
+          </strong>
+        </div>
+
+        <div>
+          <span>
+            Total value
+          </span>
+
+          <strong>
+            {totalValue}
           </strong>
         </div>
       </div>
+
+      {stats.activityDirection && (
+        <div className="wallet-activity-direction">
+          <span>
+            Activity direction
+          </span>
+
+          <strong>
+            {stats.activityDirection}
+          </strong>
+        </div>
+      )}
 
       <div className="detail-block">
         <h3>
           Risk reasons
         </h3>
 
-        {Array.isArray(
-          risk.reasons
-        ) &&
-        risk.reasons.length >
-          0 ? (
+        {riskFactors.length >
+        0 ? (
           <ul className="wallet-risk-reasons">
-            {risk.reasons.map(
+            {riskFactors.map(
               (
                 reason,
                 index
               ) => (
                 <li
-                  key={
-                    index
-                  }
+                  key={`${reason?.name || reason?.factor || "factor"}-${index}`}
                 >
-                  {typeof reason ===
-                  "object"
-                    ? reason.reason ||
-                      reason.description ||
-                      JSON.stringify(
-                        reason
-                      )
-                    : String(
-                        reason
-                      )}
+                  {renderRiskReason(
+                    reason
+                  )}
                 </li>
               )
             )}
@@ -1903,6 +2574,7 @@ function RelationshipGraph({
   selectedWallet,
   onSelectWallet,
   onSelectEdge,
+  response,
 }) {
   const groups =
     useMemo(() => {
@@ -1964,10 +2636,12 @@ function RelationshipGraph({
                     ].map(
                       (wallet) => {
                         const selected =
-                          selectedWallet?.address
-                            ?.toLowerCase() ===
-                          wallet.address
-                            ?.toLowerCase();
+                          normalizeAddress(
+                            selectedWallet?.address
+                          ) ===
+                          normalizeAddress(
+                            wallet.address
+                          );
 
                         return (
                           <button
@@ -1996,7 +2670,8 @@ function RelationshipGraph({
 
                             <span>
                               {getEntityName(
-                                wallet
+                                wallet,
+                                response
                               ) ||
                                 "Unknown"}
                             </span>
@@ -2004,7 +2679,8 @@ function RelationshipGraph({
                             <RiskBadge
                               level={
                                 getWalletRisk(
-                                  wallet
+                                  wallet,
+                                  response
                                 ).level
                               }
                             />
@@ -2147,9 +2823,7 @@ function TransactionTable({
         <thead>
           <tr>
             <th>Hash</th>
-            <th>
-              Direction
-            </th>
+            <th>Direction</th>
             <th>From</th>
             <th>To</th>
             <th>Asset</th>
@@ -2193,7 +2867,7 @@ function TransactionTable({
                   ),
 
                 value:
-                  getTransactionValue(
+                  getDisplayTransactionValue(
                     tx
                   ),
 
@@ -2457,10 +3131,8 @@ function AssetAnalytics({
             1;
 
           const value =
-            toNumber(
-              getTransactionValue(
-                tx
-              )
+            getDisplayTransactionValue(
+              tx
             );
 
           if (
@@ -2539,9 +3211,12 @@ function AssetAnalytics({
 
             <span className="asset-total-value">
               Value:{" "}
-              {formatNumber(
-                item.totalValue
-              )}
+              {item.totalValue ===
+              0
+                ? "Not provided"
+                : `${formatAssetAmount(
+                    item.totalValue
+                  )} ${item.asset}`}
             </span>
           </div>
         )
@@ -2565,8 +3240,10 @@ export default function InvestigatorDashboard({
     result ||
     null;
 
-  const [selectedWallet, setSelectedWallet] =
-    useState(null);
+  const [
+    selectedWallet,
+    setSelectedWallet,
+  ] = useState(null);
 
   const [
     selectedTransaction,
@@ -2606,15 +3283,10 @@ export default function InvestigatorDashboard({
         );
 
   /* -------------------------------------------------------
-     INVESTIGATION METADATA
+     METADATA
   ------------------------------------------------------- */
 
-  const investigationMeta =
-    response?.investigation ||
-    {};
-
   const startingWallet =
-    investigationMeta?.wallet ||
     response?.wallet_address ||
     wallets.find(
       (wallet) =>
@@ -2625,17 +3297,15 @@ export default function InvestigatorDashboard({
     "";
 
   const network =
-    investigationMeta?.network ||
     response?.network ||
     "Network not provided";
 
   const maxHops =
-    investigationMeta?.max_hops ??
     response?.max_hops ??
     null;
 
   /* -------------------------------------------------------
-     RESET STATE WHEN A NEW INVESTIGATION ARRIVES
+     RESET
   ------------------------------------------------------- */
 
   useEffect(() => {
@@ -2649,14 +3319,10 @@ export default function InvestigatorDashboard({
       direction: "",
       hop: "",
     });
-  }, [
-    startingWallet,
-    response?.summary?.total_transactions,
-    response?.summary?.total_wallets_traced,
-  ]);
+  }, [startingWallet]);
 
   /* -------------------------------------------------------
-     AUTOMATICALLY SELECT STARTING WALLET
+     AUTO SELECT ROOT
   ------------------------------------------------------- */
 
   useEffect(() => {
@@ -2683,7 +3349,7 @@ export default function InvestigatorDashboard({
   ]);
 
   /* -------------------------------------------------------
-     KEEP SELECTED WALLET VALID
+     KEEP SELECTION VALID
   ------------------------------------------------------- */
 
   useEffect(() => {
@@ -2697,8 +3363,12 @@ export default function InvestigatorDashboard({
     const exists =
       wallets.some(
         (wallet) =>
-          wallet?.address?.toLowerCase() ===
-          selectedWallet?.address?.toLowerCase()
+          normalizeAddress(
+            wallet?.address
+          ) ===
+          normalizeAddress(
+            selectedWallet?.address
+          )
       );
 
     if (!exists) {
@@ -2721,7 +3391,7 @@ export default function InvestigatorDashboard({
   ]);
 
   /* -------------------------------------------------------
-     EDGE NORMALIZATION
+     EDGES
   ------------------------------------------------------- */
 
   const edges =
@@ -2853,17 +3523,23 @@ export default function InvestigatorDashboard({
             );
 
           const from =
-            getTransactionFrom(
-              tx
-            ).toLowerCase();
+            normalizeAddress(
+              getTransactionFrom(
+                tx
+              )
+            );
 
           const to =
-            getTransactionTo(
-              tx
-            ).toLowerCase();
+            normalizeAddress(
+              getTransactionTo(
+                tx
+              )
+            );
 
           const wallet =
-            filters.wallet.toLowerCase();
+            normalizeAddress(
+              filters.wallet
+            );
 
           if (
             wallet &&
@@ -2926,9 +3602,12 @@ export default function InvestigatorDashboard({
         (wallet) => {
           if (
             filters.wallet &&
-            wallet?.address
-              ?.toLowerCase() !==
-              filters.wallet.toLowerCase()
+            normalizeAddress(
+              wallet?.address
+            ) !==
+              normalizeAddress(
+                filters.wallet
+              )
           ) {
             return false;
           }
@@ -2963,12 +3642,18 @@ export default function InvestigatorDashboard({
         (edge) => {
           if (
             filters.wallet &&
-            edge.from
-              ?.toLowerCase() !==
-              filters.wallet.toLowerCase() &&
-            edge.to
-              ?.toLowerCase() !==
-              filters.wallet.toLowerCase()
+            normalizeAddress(
+              edge.from
+            ) !==
+              normalizeAddress(
+                filters.wallet
+              ) &&
+            normalizeAddress(
+              edge.to
+            ) !==
+              normalizeAddress(
+                filters.wallet
+              )
           ) {
             return false;
           }
@@ -3020,7 +3705,7 @@ export default function InvestigatorDashboard({
     ]);
 
   /* -------------------------------------------------------
-     WALLET SELECTION
+     SELECTION
   ------------------------------------------------------- */
 
   function handleWalletSelect(
@@ -3035,10 +3720,6 @@ export default function InvestigatorDashboard({
     );
   }
 
-  /* -------------------------------------------------------
-     EDGE SELECTION
-  ------------------------------------------------------- */
-
   function handleEdgeSelect(
     edge
   ) {
@@ -3048,7 +3729,10 @@ export default function InvestigatorDashboard({
         from: edge.from,
         to: edge.to,
         asset: edge.asset,
-        value: edge.value,
+        value:
+          getDisplayTransactionValue(
+            edge
+          ),
         type:
           edge.transactionType,
         direction:
@@ -3062,12 +3746,18 @@ export default function InvestigatorDashboard({
     const wallet =
       wallets.find(
         (item) =>
-          item?.address
-            ?.toLowerCase() ===
-            edge.from?.toLowerCase() ||
-          item?.address
-            ?.toLowerCase() ===
-            edge.to?.toLowerCase()
+          normalizeAddress(
+            item?.address
+          ) ===
+            normalizeAddress(
+              edge.from
+            ) ||
+          normalizeAddress(
+            item?.address
+          ) ===
+            normalizeAddress(
+              edge.to
+            )
       );
 
     if (wallet) {
@@ -3078,7 +3768,7 @@ export default function InvestigatorDashboard({
   }
 
   /* -------------------------------------------------------
-     EMPTY STATE
+     EMPTY
   ------------------------------------------------------- */
 
   if (!response) {
@@ -3112,9 +3802,7 @@ export default function InvestigatorDashboard({
     <main className="investigator-dashboard">
       <div className="dashboard-shell">
 
-        {/* =================================================
-            HEADER
-        ================================================= */}
+        {/* HEADER */}
 
         <header className="dashboard-header">
           <div>
@@ -3145,9 +3833,7 @@ export default function InvestigatorDashboard({
           </div>
         </header>
 
-        {/* =================================================
-            TARGET
-        ================================================= */}
+        {/* TARGET */}
 
         <section className="investigation-target">
           <div>
@@ -3173,18 +3859,13 @@ export default function InvestigatorDashboard({
           </div>
         </section>
 
-        {/* =================================================
-            RISK
-        ================================================= */}
+        {/* RISK */}
 
         <RiskSummary
           response={response}
-          wallets={wallets}
         />
 
-        {/* =================================================
-            INVESTIGATION ANALYTICS
-        ================================================= */}
+        {/* SUMMARY */}
 
         <InvestigationSummary
           response={response}
@@ -3192,12 +3873,9 @@ export default function InvestigatorDashboard({
           transactions={
             transactions
           }
-          edges={edges}
         />
 
-        {/* =================================================
-            FILTERS
-        ================================================= */}
+        {/* FILTERS */}
 
         <FilterBar
           filters={filters}
@@ -3212,9 +3890,7 @@ export default function InvestigatorDashboard({
           hops={hops}
         />
 
-        {/* =================================================
-            WALLET RISK TABLE
-        ================================================= */}
+        {/* WALLET RISK */}
 
         <section className="dashboard-panel">
           <div className="panel-header">
@@ -3231,8 +3907,8 @@ export default function InvestigatorDashboard({
               <p>
                 Risk values are read
                 directly from the
-                returned wallet
-                records.
+                returned wallet risk
+                analytics.
               </p>
             </div>
 
@@ -3253,12 +3929,13 @@ export default function InvestigatorDashboard({
             onSelectWallet={
               handleWalletSelect
             }
+            response={
+              response
+            }
           />
         </section>
 
-        {/* =================================================
-            WALLET DETAIL + TRANSACTION DETAIL
-        ================================================= */}
+        {/* DETAIL */}
 
         <section className="detail-layout">
           <div className="dashboard-panel">
@@ -3268,6 +3945,9 @@ export default function InvestigatorDashboard({
               }
               transactions={
                 transactions
+              }
+              response={
+                response
               }
             />
           </div>
@@ -3281,9 +3961,7 @@ export default function InvestigatorDashboard({
           </div>
         </section>
 
-        {/* =================================================
-            GRAPH
-        ================================================= */}
+        {/* GRAPH */}
 
         <section className="dashboard-panel">
           <div className="panel-header">
@@ -3328,12 +4006,13 @@ export default function InvestigatorDashboard({
             onSelectEdge={
               handleEdgeSelect
             }
+            response={
+              response
+            }
           />
         </section>
 
-        {/* =================================================
-            ASSET ANALYTICS
-        ================================================= */}
+        {/* ASSETS */}
 
         <section className="dashboard-panel">
           <div className="panel-header">
@@ -3361,9 +4040,7 @@ export default function InvestigatorDashboard({
           />
         </section>
 
-        {/* =================================================
-            TRANSACTIONS
-        ================================================= */}
+        {/* TRANSACTIONS */}
 
         <section className="dashboard-panel">
           <div className="panel-header">
