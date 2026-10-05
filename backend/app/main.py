@@ -19,12 +19,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://cryptotrace-one\.vercel\.app|http://localhost:5173|http://localhost:3000",
+    allow_origin_regex=r"https://cryptotrace(?:-[a-z0-9]+)?(?:-sowmyas-projects-e21a9a7d)?\.vercel\.app|http://localhost:5173|http://localhost:3000",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.get("/")
 def root():
